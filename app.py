@@ -32,6 +32,13 @@ st.markdown("""
         border-radius: 8px;
         box-shadow: 0 1px 3px rgba(0,0,0,0.08);
     }
+    /* Better looking explanation boxes */
+    div[data-testid="stAlert"] {
+        padding: 1.2rem 1.4rem;
+        border-radius: 10px;
+        font-size: 1.02rem;
+        line-height: 1.55;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -263,7 +270,8 @@ elif page == "👥 Customer Intelligence (RFM)":
             """
             with st.spinner("Generating explanation..."):
                 explanation = explain_to_stakeholder(summary, context="RFM Customer Segmentation Analysis")
-            st.success(explanation)
+            st.markdown("### 📝 Stakeholder-Ready Explanation")
+            st.info(explanation)
 
     except Exception as e:
         st.error(f"Error: {e}")
@@ -321,7 +329,8 @@ elif page == "📈 Cohort Retention":
             """
             with st.spinner("Generating explanation..."):
                 explanation = explain_to_stakeholder(summary, context="Cohort Retention Analysis")
-            st.success(explanation)
+            st.markdown("### 📝 Stakeholder-Ready Explanation")
+            st.info(explanation)
 
     except Exception as e:
         st.error(f"Error: {e}")
@@ -373,7 +382,8 @@ elif page == "📦 Product & Category":
             There is variation in price points and volume across categories.
             """
             with st.spinner("Generating..."):
-                st.success(explain_to_stakeholder(summary, "Product Category Performance"))
+                st.markdown("### 📝 Stakeholder-Ready Explanation")
+                st.info(explain_to_stakeholder(summary, "Product Category Performance"))
 
     except Exception as e:
         st.error(f"Error: {e}")
@@ -558,7 +568,7 @@ elif page == "💬 Ask the Data (Groq)":
                 result = explain_to_stakeholder(custom_text, "Custom Analysis")
 
             st.markdown("### 📝 Stakeholder-Ready Explanation")
-            st.success(result)
+            st.info(result)
 
 # --------------------------------------------------
 # Footer
