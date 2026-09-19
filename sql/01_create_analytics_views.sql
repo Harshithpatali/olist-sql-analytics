@@ -156,20 +156,34 @@ ORDER BY 1, 2
 
 -- 5. Monthly Business KPIs
 CREATE OR REPLACE VIEW vw_monthly_kpis AS
+WITH order_level AS (
+    SELECT
+        purchase_month_date AS purchase_month,
+        year_month,
+        order_id,
+        MAX(customer_unique_id) AS customer_unique_id,
+        SUM(total_item_value) AS order_value,
+        SUM(price) AS product_revenue,
+        SUM(freight_value) AS freight_revenue,
+        AVG(review_score) AS order_review_score,
+        AVG(delivery_days) AS order_delivery_days,
+        BOOL_AND(delivery_status = 'On Time') AS order_on_time
+    FROM vw_order_fact
+    GROUP BY 1, 2, 3
+)
 SELECT
-    purchase_month_date AS purchase_month,
+    purchase_month,
     year_month,
-    COUNT(DISTINCT order_id) AS total_orders,
+    COUNT(*) AS total_orders,
     COUNT(DISTINCT customer_unique_id) AS unique_customers,
-    SUM(total_item_value) AS gmv,
-    AVG(total_item_value) AS aov,
-    SUM(price) AS product_revenue,
-    SUM(freight_value) AS freight_revenue,
-    AVG(review_score) AS avg_review_score,
-    AVG(delivery_days) AS avg_delivery_days,
-    COUNT(*) FILTER (WHERE delivery_status = 'On Time') * 100.0 
-        / NULLIF(COUNT(*), 0) AS on_time_pct
-FROM vw_order_fact
+    SUM(order_value) AS gmv,
+    SUM(order_value) / NULLIF(COUNT(*), 0) AS aov,
+    SUM(product_revenue) AS product_revenue,
+    SUM(freight_revenue) AS freight_revenue,
+    AVG(order_review_score) AS avg_review_score,
+    AVG(order_delivery_days) AS avg_delivery_days,
+    AVG(CASE WHEN order_on_time THEN 100.0 ELSE 0.0 END) AS on_time_pct
+FROM order_level
 GROUP BY 1, 2
 ORDER BY 1
 ;
