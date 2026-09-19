@@ -1,103 +1,127 @@
 import json
 import os
+from functools import lru_cache
 from typing import Any, Dict
 
 from dotenv import load_dotenv
-from groq import Groq
+try:
+    from groq import Groq
+except ImportError:  # Keep the app importable when the optional SDK is absent.
+    Groq = None
 
 load_dotenv()
 
-# ------------------------------------------------------------
+# ============================================================
 # Configuration
-# ------------------------------------------------------------
+# ============================================================
 
 GROQ_MODEL = "openai/gpt-oss-20b"
 
-# Keep the brief deliberately compact.
-# The previous implementation could hit the completion limit
-# while trying to produce the required JSON.
-BRIEF_MAX_TOKENS = 1800
+# The brief is intentionally short. A larger limit is retained
+# because reasoning-capable models can consume completion budget.
+BRIEF_MAX_TOKENS = 2400
 
 
-# ------------------------------------------------------------
+# ============================================================
 # Groq client
-# ------------------------------------------------------------
+# ============================================================
 
+@lru_cache(maxsize=1)
 def get_groq_client():
+    """
+    Cache the Groq client for the lifetime of the Streamlit
+    process. This avoids rebuilding the client on every rerun.
+    """
     api_key = os.getenv("GROQ_API_KEY")
 
-    if not api_key:
+    if not api_key or Groq is None:
         return None
 
     return Groq(api_key=api_key)
 
 
-# ------------------------------------------------------------
-# JSON helper
-# ------------------------------------------------------------
+# ============================================================
+# JSON utilities
+# ============================================================
 
-def _call_json(
-    system_prompt: str,
-    user_prompt: str,
-    max_tokens: int = BRIEF_MAX_TOKENS,
-) -> Dict[str, Any]:
-
-    client = get_groq_client()
-
-    if client is None:
-        raise RuntimeError(
-            "GROQ_API_KEY not set. "
-            "Add it to .env or Streamlit secrets."
+def _json_safe(value):
+    """Convert pandas/numpy/date-like values to JSON-safe data."""
+    try:
+        return json.loads(
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                default=str,
+            )
         )
+    except Exception as exc:
+        raise ValueError(
+            f"Could not serialize AI metrics: {exc}"
+        ) from exc
 
-    response = client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=[
-            {
-                "role": "system",
-                "content": system_prompt,
-            },
-            {
-                "role": "user",
-                "content": user_prompt,
-            },
-        ],
-        temperature=0.1,
-        max_tokens=max_tokens,
-        response_format={
-            "type": "json_object"
-        },
-    )
 
-    if not response.choices:
-        raise RuntimeError("Groq returned no choices.")
-
-    raw = response.choices[0].message.content
-
-    if not raw:
+def _extract_json_object(text: str) -> Dict[str, Any]:
+    """
+    Parse a JSON object even if a model accidentally wraps it
+    in a markdown code fence or adds surrounding whitespace.
+    """
+    if not text:
         raise RuntimeError(
             "Groq returned an empty response."
         )
 
+    cleaned = text.strip()
+
+    if cleaned.startswith("```"):
+        cleaned = cleaned.replace(
+            "```json",
+            "",
+            1,
+        ).replace(
+            "```",
+            "",
+        ).strip()
+
     try:
-        return json.loads(raw)
+        result = json.loads(cleaned)
 
-    except json.JSONDecodeError as e:
-        raise RuntimeError(
-            "Groq returned invalid JSON. "
-            f"Raw response: {raw[:1000]}"
-        ) from e
+        if isinstance(result, dict):
+            return result
+
+    except json.JSONDecodeError:
+        pass
+
+    # Last-resort extraction of the outermost JSON object.
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+
+    if start >= 0 and end > start:
+        candidate = cleaned[start:end + 1]
+
+        try:
+            result = json.loads(candidate)
+
+            if isinstance(result, dict):
+                return result
+
+        except json.JSONDecodeError:
+            pass
+
+    raise RuntimeError(
+        "Groq returned invalid JSON.\n\n"
+        f"Raw response:\n{cleaned[:4000]}"
+    )
 
 
-# ------------------------------------------------------------
-# Validate stakeholder brief
-# ------------------------------------------------------------
+# ============================================================
+# Stakeholder brief validation
+# ============================================================
 
 def _validate_stakeholder_brief(
-    brief: Dict[str, Any]
+    brief: Dict[str, Any],
 ) -> Dict[str, Any]:
 
-    required_keys = {
+    required = {
         "status",
         "headline",
         "summary",
@@ -107,11 +131,11 @@ def _validate_stakeholder_brief(
         "caveat",
     }
 
-    missing = required_keys - set(brief.keys())
+    missing = required - set(brief)
 
     if missing:
         raise ValueError(
-            "Stakeholder brief is missing required fields: "
+            "AI brief is missing: "
             + ", ".join(sorted(missing))
         )
 
@@ -124,79 +148,88 @@ def _validate_stakeholder_brief(
 
     if brief["status"] not in valid_statuses:
         raise ValueError(
-            f"Invalid status '{brief['status']}'. "
-            f"Expected one of: {', '.join(sorted(valid_statuses))}"
+            "Invalid AI status: "
+            f"{brief['status']}"
         )
 
-    if not isinstance(brief["findings"], list):
+    findings = brief["findings"]
+
+    if not isinstance(findings, list):
         raise ValueError(
-            "Brief findings must be a list."
+            "AI findings must be a list."
         )
 
-    if not 3 <= len(brief["findings"]) <= 4:
+    if not 3 <= len(findings) <= 4:
         raise ValueError(
-            "Brief must contain 3 or 4 findings."
+            f"AI returned {len(findings)} findings; "
+            "expected 3 or 4."
         )
 
-    for i, finding in enumerate(brief["findings"]):
+    for i, item in enumerate(findings, 1):
 
-        if not isinstance(finding, dict):
+        if not isinstance(item, dict):
             raise ValueError(
-                f"Finding {i + 1} must be an object."
+                f"Finding {i} is not an object."
             )
 
-        for key in [
+        for key in (
             "label",
             "number",
             "detail",
-        ]:
-            if key not in finding:
+        ):
+            if key not in item:
                 raise ValueError(
-                    f"Finding {i + 1} is missing '{key}'."
+                    f"Finding {i} missing '{key}'."
                 )
 
-    if not isinstance(brief["risks"], list):
+    risks = brief["risks"]
+
+    if not isinstance(risks, list):
         raise ValueError(
-            "Brief risks must be a list."
+            "AI risks must be a list."
         )
 
-    if len(brief["risks"]) > 3:
-        brief["risks"] = brief["risks"][:3]
+    brief["risks"] = [
+        str(x) for x in risks[:2]
+    ]
 
-    if not isinstance(brief["actions"], list):
+    actions = brief["actions"]
+
+    if not isinstance(actions, list):
         raise ValueError(
-            "Brief actions must be a list."
+            "AI actions must be a list."
         )
 
-    if len(brief["actions"]) != 3:
+    if len(actions) != 3:
         raise ValueError(
-            "Brief must contain exactly 3 actions."
+            f"AI returned {len(actions)} actions; "
+            "expected exactly 3."
         )
 
-    for i, action in enumerate(brief["actions"]):
+    for i, item in enumerate(actions, 1):
 
-        if not isinstance(action, dict):
+        if not isinstance(item, dict):
             raise ValueError(
-                f"Action {i + 1} must be an object."
+                f"Action {i} is not an object."
             )
 
-        for key in [
+        for key in (
             "priority",
             "action",
             "reason",
             "expected_impact",
-        ]:
-            if key not in action:
+        ):
+            if key not in item:
                 raise ValueError(
-                    f"Action {i + 1} is missing '{key}'."
+                    f"Action {i} missing '{key}'."
                 )
 
     return brief
 
 
-# ------------------------------------------------------------
-# Stakeholder brief
-# ------------------------------------------------------------
+# ============================================================
+# Main stakeholder brief
+# ============================================================
 
 def generate_stakeholder_brief(
     numbers: Dict[str, Any],
@@ -204,231 +237,191 @@ def generate_stakeholder_brief(
     audience: str = "Executive",
 ) -> Dict[str, Any]:
 
-    """
-    Generate a concise, data-grounded stakeholder brief.
+    client = get_groq_client()
 
-    The LLM receives only the computed metrics supplied by the
-    application. It does not calculate business metrics itself.
-    """
+    if client is None:
+        raise RuntimeError(
+            "GROQ_API_KEY is missing. "
+            "Add it to .env or Streamlit secrets."
+        )
 
-    audience_guidance = {
+    safe_numbers = _json_safe(numbers)
 
+    focus = {
         "Executive": (
-            "Focus on overall business health, material risks, "
-            "revenue, customer health and strategic priorities."
+            "business health, material risks, "
+            "revenue and strategic priorities"
         ),
-
         "Marketing": (
-            "Focus on customers, segments, retention, "
-            "repeat purchasing, revenue contribution and "
-            "customer growth opportunities."
+            "customers, segments, retention, "
+            "repeat purchasing and growth"
         ),
-
         "Operations": (
-            "Focus on delivery, service quality, sellers, "
-            "operational weaknesses and execution priorities."
+            "delivery, sellers, service quality "
+            "and operational reliability"
         ),
-
         "Finance": (
-            "Focus on revenue, order economics, customer value, "
-            "revenue concentration and financial risks."
+            "revenue, order economics, customer value "
+            "and financial exposure"
         ),
-
     }.get(
         audience,
-        "Use a balanced business perspective."
+        "overall business performance",
     )
 
-    # --------------------------------------------------------
-    # Convert everything into JSON-safe values
-    # --------------------------------------------------------
-
-    try:
-        safe_numbers = json.loads(
-            json.dumps(
-                numbers,
-                ensure_ascii=False,
-                default=str,
-            )
-        )
-    except Exception as e:
-        raise ValueError(
-            f"Could not serialize stakeholder metrics: {e}"
-        )
-
-    # --------------------------------------------------------
-    # Compact system prompt
-    # --------------------------------------------------------
-
-    system_prompt = f"""
-You are a senior business analyst.
-
-Audience: {audience}
-
-Audience focus:
-{audience_guidance}
+    # Keep this prompt deliberately compact.
+    system_prompt = """
+You are a concise business analytics assistant.
 
 Use ONLY the supplied metrics.
-
-Never invent numbers.
-Never invent facts.
-Do not claim causation unless the supplied data proves it.
-Do not assume that a segment is strong or weak without evidence.
-Recommendations may be qualitative, but their reasons must reference supplied metrics.
-
+Never invent numbers or facts.
+Do not claim causation.
 Return ONLY valid JSON.
+Keep every text field short.
+"""
 
-Use exactly this structure:
+    user_prompt = f"""
+Create a stakeholder brief for the {audience} audience.
+
+Focus: {focus}
+
+Context:
+{context}
+
+Return exactly this JSON structure:
 
 {{
-  "status": "Strong",
-  "headline": "one concise sentence",
-  "summary": "two concise sentences",
+  "status": "Stable",
+  "headline": "one sentence",
+  "summary": "two short sentences",
   "findings": [
     {{
       "label": "short label",
-      "number": "display-ready number",
-      "detail": "one concise sentence"
+      "number": "number",
+      "detail": "short explanation"
     }},
     {{
       "label": "short label",
-      "number": "display-ready number",
-      "detail": "one concise sentence"
+      "number": "number",
+      "detail": "short explanation"
     }},
     {{
       "label": "short label",
-      "number": "display-ready number",
-      "detail": "one concise sentence"
+      "number": "number",
+      "detail": "short explanation"
     }}
   ],
   "risks": [
-    "short evidence-based risk",
     "short evidence-based risk"
   ],
   "actions": [
     {{
       "priority": 1,
       "action": "short action",
-      "reason": "short evidence-based reason",
-      "expected_impact": "short qualitative impact"
+      "reason": "short reason",
+      "expected_impact": "short impact"
     }},
     {{
       "priority": 2,
       "action": "short action",
-      "reason": "short evidence-based reason",
-      "expected_impact": "short qualitative impact"
+      "reason": "short reason",
+      "expected_impact": "short impact"
     }},
     {{
       "priority": 3,
       "action": "short action",
-      "reason": "short evidence-based reason",
-      "expected_impact": "short qualitative impact"
+      "reason": "short reason",
+      "expected_impact": "short impact"
     }}
   ],
-  "caveat": "one concise sentence"
+  "caveat": "one short caveat"
 }}
 
-Rules:
-- status must be exactly one of:
-  Strong
-  Stable
-  Watch closely
-  At risk
-- exactly 3 findings
-- maximum 2 risks
-- exactly 3 actions
-- keep all text concise
-- no markdown
-- no bullet points
-- no commentary outside JSON
-"""
+Status must be exactly:
+Strong, Stable, Watch closely, or At risk.
 
-    # --------------------------------------------------------
-    # Compact user prompt
-    # --------------------------------------------------------
+Exactly 3 findings.
+Exactly 3 actions.
+Maximum 2 risks.
 
-    user_prompt = f"""
-Business context:
-{context}
-
-Computed metrics:
+Metrics:
 {json.dumps(
     safe_numbers,
     ensure_ascii=False,
-    indent=2,
+    separators=(",", ":"),
 )}
 
-Create the stakeholder brief now.
 Return JSON only.
 """
 
-    # --------------------------------------------------------
-    # Call model
-    # --------------------------------------------------------
+    try:
+        response = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": system_prompt,
+                },
+                {
+                    "role": "user",
+                    "content": user_prompt,
+                },
+            ],
+            temperature=0,
+            max_tokens=BRIEF_MAX_TOKENS,
+            response_format={
+                "type": "json_object"
+            },
+        )
 
-    brief = _call_json(
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        max_tokens=BRIEF_MAX_TOKENS,
-    )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Groq API request failed: {exc}"
+        ) from exc
 
-    # --------------------------------------------------------
-    # Validate
-    # --------------------------------------------------------
+    if not response.choices:
+        raise RuntimeError(
+            "Groq returned no choices."
+        )
+
+    raw = response.choices[0].message.content
+
+    brief = _extract_json_object(raw)
 
     return _validate_stakeholder_brief(brief)
 
 
-# ------------------------------------------------------------
-# Legacy compatibility function
-# ------------------------------------------------------------
+# ============================================================
+# Legacy compatibility
+# ============================================================
 
 def explain_to_stakeholder(
     metrics_text: str,
     context: str = "",
 ) -> str:
 
-    """
-    Backward-compatible legacy explanation API.
-
-    Existing code using explain_to_stakeholder()
-    continues to work.
-    """
-
     client = get_groq_client()
 
     if client is None:
         return (
-            "⚠️ GROQ_API_KEY not set. "
-            "Please add it to your .env file or "
-            "Streamlit secrets."
+            "GROQ_API_KEY is not configured."
         )
 
     system_prompt = """
-You are a senior data analyst speaking to
-non-technical business stakeholders.
+You are a business analyst.
 
-Use simple business language.
-
-Use only numbers supplied by the user.
-
-Do not invent facts.
-
+Explain the supplied metrics in simple language.
+Use only supplied information.
 Do not invent numbers.
-
 Be concise.
-
-Give practical recommendations when supported
-by the supplied metrics.
 """
 
     user_prompt = (
         f"Context: {context}\n\n"
-        f"Metrics / findings:\n{metrics_text}"
+        f"Metrics:\n{metrics_text}"
     )
 
     try:
-
         response = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[
@@ -442,22 +435,24 @@ by the supplied metrics.
                 },
             ],
             temperature=0.2,
-            max_tokens=600,
+            max_tokens=500,
         )
-
-        return response.choices[0].message.content
-
-    except Exception as e:
 
         return (
-            f"Error calling Groq "
-            f"({GROQ_MODEL}): {e}"
+            response.choices[0]
+            .message
+            .content
+        )
+
+    except Exception as exc:
+        return (
+            f"Error calling Groq: {exc}"
         )
 
 
-# ------------------------------------------------------------
+# ============================================================
 # General insight summary
-# ------------------------------------------------------------
+# ============================================================
 
 def generate_insight_summary(
     df_summary: str,
@@ -472,7 +467,6 @@ def generate_insight_summary(
         )
 
     try:
-
         response = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[
@@ -480,7 +474,7 @@ def generate_insight_summary(
                     "role": "system",
                     "content": (
                         "You are a data analyst. "
-                        "Give a concise business insight "
+                        "Give one concise business insight "
                         "based only on supplied data."
                     ),
                 },
@@ -488,26 +482,29 @@ def generate_insight_summary(
                     "role": "user",
                     "content": (
                         f"Topic: {topic}\n\n"
-                        f"Data summary:\n{df_summary}"
+                        f"Data:\n{df_summary}"
                     ),
                 },
             ],
             temperature=0.2,
-            max_tokens=250,
+            max_tokens=200,
         )
-
-        return response.choices[0].message.content
-
-    except Exception as e:
 
         return (
-            f"Could not generate insight: {e}"
+            response.choices[0]
+            .message
+            .content
+        )
+
+    except Exception as exc:
+        return (
+            f"Could not generate insight: {exc}"
         )
 
 
-# ------------------------------------------------------------
-# Convert brief to Markdown
-# ------------------------------------------------------------
+# ============================================================
+# Markdown export
+# ============================================================
 
 def brief_to_markdown(
     brief: Dict[str, Any],
@@ -517,42 +514,21 @@ def brief_to_markdown(
 ) -> str:
 
     lines = [
-
         f"# Stakeholder Brief — {context}",
-
         "",
-
         f"**Audience:** {audience}",
-
         f"**Status:** {status}",
-
         "",
-
         "## Conclusion",
-
-        brief.get(
-            "headline",
-            "",
-        ),
-
+        brief.get("headline", ""),
         "",
-
         "## Summary",
-
-        brief.get(
-            "summary",
-            "",
-        ),
-
+        brief.get("summary", ""),
         "",
-
         "## Findings",
     ]
 
-    for item in brief.get(
-        "findings",
-        [],
-    ):
+    for item in brief.get("findings", []):
 
         lines.append(
             "- **"
@@ -570,31 +546,19 @@ def brief_to_markdown(
         ]
     )
 
-    for risk in brief.get(
-        "risks",
-        [],
-    ):
-
-        lines.append(
-            f"- {risk}"
-        )
+    for risk in brief.get("risks", []):
+        lines.append(f"- {risk}")
 
     lines.extend(
         [
             "",
-            "## Prioritised actions",
+            "## Prioritised Actions",
         ]
     )
 
     actions = sorted(
-        brief.get(
-            "actions",
-            [],
-        ),
-        key=lambda x: x.get(
-            "priority",
-            99,
-        ),
+        brief.get("actions", []),
+        key=lambda x: x.get("priority", 99),
     )
 
     for action in actions:
@@ -623,9 +587,8 @@ def brief_to_markdown(
             brief.get(
                 "caveat",
                 (
-                    "Read these figures as descriptive "
-                    "metrics for the selected data and "
-                    "filters; they do not establish causation."
+                    "These figures describe the selected "
+                    "data and filters; they do not establish causation."
                 ),
             ),
         ]

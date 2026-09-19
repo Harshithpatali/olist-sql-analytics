@@ -28,74 +28,276 @@ DEFAULT_MIN_MONTHLY_ORDERS = 100
 
 st.markdown("""
 <style>
-.block-container {padding-top: 1.5rem; padding-bottom: 2rem;}
+.block-container {
+    padding-top: 1.25rem;
+    padding-bottom: 2rem;
+}
+
+/* Dark-theme KPI cards: avoid the white blocks visible in dark mode. */
 [data-testid="stMetric"] {
-    border: 1px solid #e8eaed;
-    border-radius: 12px;
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    border-radius: 14px;
     padding: 12px 14px;
-    background: white;
+    background: rgba(30, 41, 59, 0.72);
+    box-shadow: none;
 }
+
+[data-testid="stMetric"] label,
+[data-testid="stMetric"] [data-testid="stMetricLabel"] {
+    color: #cbd5e1 !important;
+}
+
+[data-testid="stMetric"] [data-testid="stMetricValue"] {
+    color: #f8fafc !important;
+}
+
+[data-testid="stMetric"] [data-testid="stMetricDelta"] {
+    color: #cbd5e1 !important;
+}
+
 .brief-card {
-    border: 1px solid #e4e7eb; border-radius: 14px; padding: 20px;
-    background: #ffffff; margin: 8px 0 18px 0;
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    border-radius: 14px;
+    padding: 18px;
+    background: rgba(30, 41, 59, 0.72);
+    margin: 8px 0 18px 0;
 }
+
 .status-pill {
-    display: inline-block; padding: 5px 11px; border-radius: 999px;
-    font-weight: 700; font-size: 0.82rem; margin-bottom: 8px;
+    display: inline-block;
+    padding: 5px 11px;
+    border-radius: 999px;
+    font-weight: 700;
+    font-size: 0.82rem;
+    margin-bottom: 8px;
 }
-.status-strong {background:#e8f7ee;color:#167a45;}
-.status-stable {background:#edf4ff;color:#2359a6;}
-.status-watch {background:#fff5df;color:#946200;}
-.status-risk {background:#ffe9e9;color:#a32626;}
-.finding-number {font-size:1.65rem;font-weight:750;line-height:1.1;}
-.finding-label {font-weight:650;margin-top:3px;}
-.muted {color:#667085;font-size:.9rem;}
+
+.status-strong { background:#143d2a; color:#86efac; }
+.status-stable { background:#172f52; color:#93c5fd; }
+.status-watch { background:#4a3510; color:#fcd34d; }
+.status-risk { background:#4a1d1d; color:#fca5a5; }
+
+.finding-number {
+    font-size: 1.65rem;
+    font-weight: 750;
+    line-height: 1.1;
+    color: #f8fafc;
+}
+
+.finding-label {
+    font-weight: 650;
+    margin-top: 3px;
+    color: #e2e8f0;
+}
+
+.muted {
+    color: #cbd5e1;
+    font-size: .9rem;
+}
+
+div[data-testid="stExpander"] {
+    border-color: rgba(148, 163, 184, 0.22);
+}
+
+div[data-testid="stDownloadButton"] button {
+    width: 100%;
+}
+
 </style>
 """, unsafe_allow_html=True)
 
 
 # ============================================================
-# Data access
+# Data access + cached transformations
 # ============================================================
-@st.cache_data(ttl=3600)
-def load_monthly_kpis():
-    return run_query("SELECT * FROM vw_monthly_kpis ORDER BY purchase_month")
 
-@st.cache_data(ttl=3600)
+def _normalize_percent_column(df, column):
+    """Normalize percentage columns that may be stored as 0-1 or 0-100."""
+    df = df.copy()
+    if column not in df.columns or df.empty:
+        return df
+
+    values = pd.to_numeric(df[column], errors="coerce")
+    finite = values.dropna()
+
+    if not finite.empty and finite.max() <= 1.000001:
+        values = values * 100.0
+
+    df[column] = values
+    return df
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_monthly_kpis():
+    df = run_query(
+        "SELECT * FROM vw_monthly_kpis ORDER BY purchase_month"
+    )
+    df["total_orders"] = pd.to_numeric(
+        df["total_orders"], errors="coerce"
+    )
+    df["gmv"] = pd.to_numeric(
+        df["gmv"], errors="coerce"
+    )
+    df["avg_review_score"] = pd.to_numeric(
+        df["avg_review_score"], errors="coerce"
+    )
+    df["on_time_pct"] = pd.to_numeric(
+        df["on_time_pct"], errors="coerce"
+    )
+    return _normalize_percent_column(df, "on_time_pct")
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_rfm():
     return run_query("SELECT * FROM vw_rfm_segments")
 
-@st.cache_data(ttl=3600)
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_cohort():
     return run_query("SELECT * FROM vw_cohort_retention")
 
-@st.cache_data(ttl=3600)
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_product():
-    return run_query("SELECT * FROM vw_product_performance ORDER BY revenue DESC LIMIT 30")
+    return run_query(
+        "SELECT * FROM vw_product_performance "
+        "ORDER BY revenue DESC LIMIT 30"
+    )
 
-@st.cache_data(ttl=3600)
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_seller():
-    return run_query("SELECT * FROM vw_seller_performance ORDER BY revenue DESC LIMIT 50")
+    df = run_query(
+        "SELECT * FROM vw_seller_performance "
+        "ORDER BY revenue DESC LIMIT 50"
+    )
+    return _normalize_percent_column(df, "on_time_pct")
 
-@st.cache_data(ttl=3600)
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_state():
-    return run_query("SELECT * FROM vw_state_performance")
+    df = run_query(
+        "SELECT * FROM vw_state_performance"
+    )
+    return _normalize_percent_column(df, "on_time_pct")
 
-@st.cache_data(ttl=3600)
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_new_returning():
-    return run_query("SELECT * FROM vw_new_vs_returning ORDER BY purchase_month")
+    return run_query(
+        "SELECT * FROM vw_new_vs_returning "
+        "ORDER BY purchase_month"
+    )
 
-@st.cache_data(ttl=3600)
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_customer_metrics():
-    return run_query("SELECT * FROM vw_customer_metrics")
+    return run_query(
+        "SELECT * FROM vw_customer_metrics"
+    )
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_filtered_kpis(min_monthly_orders):
+    kpis = load_monthly_kpis().copy()
+    kpis["total_orders"] = pd.to_numeric(
+        kpis["total_orders"], errors="coerce"
+    )
+    return kpis[
+        kpis["total_orders"] >= int(min_monthly_orders)
+    ].copy()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def build_rfm_segments(rfm):
+    seg = (
+        rfm.groupby("rfm_segment")
+        .agg(
+            customers=("customer_unique_id", "count"),
+            total_revenue=("total_revenue", "sum"),
+            avg_revenue=("total_revenue", "mean"),
+            avg_orders=("total_orders", "mean"),
+        )
+        .reset_index()
+        .sort_values(
+            "total_revenue",
+            ascending=False,
+        )
+    )
+
+    total_revenue = seg["total_revenue"].sum()
+
+    if total_revenue:
+        seg["revenue_share_pct"] = (
+            seg["total_revenue"]
+            / total_revenue
+            * 100
+        )
+    else:
+        seg["revenue_share_pct"] = 0.0
+
+    return seg
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def sample_rfm(rfm, sample_size=3000):
+    return rfm.sample(
+        min(sample_size, len(rfm)),
+        random_state=42,
+    )
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def build_seller_review(sellers, on_time_target, rating_target):
+    result = sellers.copy()
+
+    result["needs_review"] = (
+        result["on_time_pct"] < on_time_target
+    ) | (
+        result["avg_rating"] < rating_target
+    )
+
+    review = (
+        result[result["needs_review"]]
+        .sort_values(
+            "revenue",
+            ascending=False,
+        )
+        .head(20)
+        .copy()
+    )
+
+    return result, review
+
+
+def filtered_kpis():
+    return get_filtered_kpis(
+        st.session_state.min_monthly_orders
+    )
 
 
 def plot_chart(fig, **kwargs):
-    """Use Streamlit's current width API, with compatibility for older versions."""
+    """Render charts consistently with the dark application theme."""
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#e5e7eb"),
+        margin=dict(l=50, r=30, t=55, b=45),
+    )
+
     try:
-        st.plotly_chart(fig, width="stretch", **kwargs)
+        st.plotly_chart(
+            fig,
+            width="stretch",
+            **kwargs,
+        )
     except TypeError:
-        st.plotly_chart(fig, use_container_width=True, **kwargs)
+        st.plotly_chart(
+            fig,
+            use_container_width=True,
+            **kwargs,
+        )
 
 
 def show_df(df, **kwargs):
@@ -123,11 +325,17 @@ def status_from_metrics(numbers):
 
     on_time = numbers.get("on_time_pct")
     rating = numbers.get("avg_rating")
-    returning_share = numbers.get("returning_revenue_share")
+    returning_share = numbers.get(
+        "returning_revenue_share",
+        numbers.get("returning_share"),
+    )
     m1_retention = numbers.get("m1_retention")
 
     if on_time is not None and not pd.isna(on_time):
-        checks.append(float(on_time) >= ON_TIME_TARGET)
+        on_time_value = float(on_time)
+        if on_time_value <= 1.0:
+            on_time_value *= 100.0
+        checks.append(on_time_value >= ON_TIME_TARGET)
 
     if rating is not None and not pd.isna(rating):
         checks.append(float(rating) >= GOOD_RATING)
@@ -341,14 +549,16 @@ def generate_brief_button(context, numbers, status=None):
                 st.session_state[f"brief_error_{context}"] = None
 
             except Exception as e:
-                st.session_state[f"brief_error_{context}"] = str(e)
+                st.session_state[f"brief_error_{context}"] = (
+                    f"{type(e).__name__}: {e}"
+                )
 
     error = st.session_state.get(f"brief_error_{context}")
 
     if error:
-        st.error("Could not generate the brief.")
-        with st.expander("Technical details"):
-            st.code(error)
+        st.error(
+            f"Could not generate the brief: {error}"
+        )
 
     stored = st.session_state.get(f"brief_result_{context}")
 
@@ -385,6 +595,12 @@ def csv_download(df, label, filename, key):
 # ============================================================
 # Sidebar
 # ============================================================
+if "brief_audience" not in st.session_state:
+    st.session_state.brief_audience = "Executive"
+
+if "min_monthly_orders" not in st.session_state:
+    st.session_state.min_monthly_orders = DEFAULT_MIN_MONTHLY_ORDERS
+
 st.sidebar.title("📊 Olist BI Platform")
 st.sidebar.caption("SQL analytics + stakeholder-ready AI")
 st.sidebar.markdown("---")
@@ -420,6 +636,10 @@ st.session_state.min_monthly_orders = st.sidebar.slider(
 )
 
 with st.sidebar.expander("🔌 Connection Status"):
+    if st.button("Refresh data", width="stretch"):
+        st.cache_data.clear()
+        st.rerun()
+
     if st.button("Test Database Connection"):
         if test_connection():
             st.success("Connected to Supabase")
@@ -448,8 +668,26 @@ if page == "🏠 Executive Overview":
         total_orders = kpis["total_orders"].sum()
         total_customers = rfm.shape[0]
         avg_aov = total_gmv / total_orders if total_orders else np.nan
-        avg_rating = np.average(kpis["avg_review_score"], weights=kpis["total_orders"])
-        avg_on_time = np.average(kpis["on_time_pct"], weights=kpis["total_orders"])
+        valid_rating = kpis["avg_review_score"].notna()
+        valid_on_time = kpis["on_time_pct"].notna()
+
+        avg_rating = (
+            np.average(
+                kpis.loc[valid_rating, "avg_review_score"],
+                weights=kpis.loc[valid_rating, "total_orders"],
+            )
+            if valid_rating.any()
+            else np.nan
+        )
+
+        avg_on_time = (
+            np.average(
+                kpis.loc[valid_on_time, "on_time_pct"],
+                weights=kpis.loc[valid_on_time, "total_orders"],
+            )
+            if valid_on_time.any()
+            else np.nan
+        )
         prev = kpis.iloc[-2] if len(kpis) > 1 else None
         latest = kpis.iloc[-1]
         gmv_change = pct_change(latest["gmv"], prev["gmv"]) if prev is not None else np.nan
@@ -508,14 +746,7 @@ elif page == "👥 Customer Intelligence (RFM)":
     st.caption("Recency, frequency and monetary value for customer prioritisation.")
     try:
         rfm = load_rfm()
-        seg = rfm.groupby("rfm_segment").agg(
-            customers=("customer_unique_id", "count"),
-            total_revenue=("total_revenue", "sum"),
-            avg_revenue=("total_revenue", "mean"),
-            avg_orders=("total_orders", "mean"),
-        ).reset_index().sort_values("total_revenue", ascending=False)
-        total_revenue = seg["total_revenue"].sum()
-        seg["revenue_share_pct"] = seg["total_revenue"] / total_revenue * 100
+        seg = build_rfm_segments(rfm)
 
         c1, c2 = st.columns([1.2, 1])
         with c1:
@@ -528,7 +759,7 @@ elif page == "👥 Customer Intelligence (RFM)":
             }), height=400)
 
         plot_chart(px.scatter(
-            rfm.sample(min(3000, len(rfm)), random_state=42),
+            sample_rfm(rfm),
             x="recency_days", y="total_revenue", color="f_score",
             size="total_orders", hover_data=["rfm_segment"], title="Customer Value Landscape"
         ))
@@ -649,7 +880,11 @@ elif page == "🏪 Seller Performance":
     st.title("Seller Performance & Delivery Quality")
     try:
         sellers = load_seller()
-        sellers["needs_review"] = (sellers["on_time_pct"] < ON_TIME_TARGET) | (sellers["avg_rating"] < GOOD_RATING)
+        sellers, review = build_seller_review(
+            sellers,
+            ON_TIME_TARGET,
+            GOOD_RATING,
+        )
 
         plot_chart(px.bar(sellers.head(15), x="revenue", y="seller_id", orientation="h", title="Top Sellers by Revenue", color="avg_rating"))
         plot_chart(px.scatter(
@@ -657,7 +892,6 @@ elif page == "🏪 Seller Performance":
             hover_data=["seller_id", "orders_fulfilled"], title="Delivery Speed vs Rating"
         ))
 
-        review = sellers[sellers["needs_review"]].sort_values("revenue", ascending=False).head(20)
         st.subheader("Sellers to review first")
         show_df(review)
         csv_download(sellers, "Download seller table", "seller_performance.csv", "csv_seller")
@@ -745,7 +979,13 @@ elif page == "🔄 New vs Returning":
             "returning_revenue": round(float(returning), 2),
             "returning_revenue_share_pct": None if pd.isna(returning_share) else round(float(returning_share), 2),
         }
-        generate_brief_button("New vs Returning Customers", numbers, status_from_metrics({"returning_revenue_share": returning_share}))
+        generate_brief_button(
+            "New vs Returning Customers",
+            numbers,
+            status_from_metrics(
+                {"returning_share": returning_share}
+            ),
+        )
     except Exception as e:
         st.error(f"Error: {e}")
 
