@@ -120,22 +120,34 @@ def pct_change(current, previous):
 def status_from_metrics(numbers):
     """Deterministic status; the LLM does not decide the status."""
     checks = []
-    if numbers.get("on_time_pct") is not None:
-        checks.append(numbers["on_time_pct"] >= ON_TIME_TARGET)
-    if numbers.get("avg_rating") is not None:
-        checks.append(numbers["avg_rating"] >= GOOD_RATING)
-    if numbers.get("returning_revenue_share") is not None:
-        checks.append(numbers["returning_revenue_share"] >= 30)
-    if numbers.get("m1_retention") is not None:
-        checks.append(numbers["m1_retention"] >= 20)
+
+    on_time = numbers.get("on_time_pct")
+    rating = numbers.get("avg_rating")
+    returning_share = numbers.get("returning_revenue_share")
+    m1_retention = numbers.get("m1_retention")
+
+    if on_time is not None and not pd.isna(on_time):
+        checks.append(float(on_time) >= ON_TIME_TARGET)
+
+    if rating is not None and not pd.isna(rating):
+        checks.append(float(rating) >= GOOD_RATING)
+
+    if returning_share is not None and not pd.isna(returning_share):
+        checks.append(float(returning_share) >= 30)
+
+    if m1_retention is not None and not pd.isna(m1_retention):
+        checks.append(float(m1_retention) >= 20)
+
     if not checks:
         return "Stable"
+
     score = sum(bool(x) for x in checks) / len(checks)
-    if score >= .80:
+
+    if score >= 0.80:
         return "Strong"
-    if score >= .50:
+    if score >= 0.50:
         return "Stable"
-    if score >= .25:
+    if score >= 0.25:
         return "Watch closely"
     return "At risk"
 
@@ -150,63 +162,214 @@ def render_status(status):
     st.markdown(f'<span class="status-pill {cls}">{html.escape(status)}</span>', unsafe_allow_html=True)
 
 
-def render_brief(brief, status, audience, context, numbers):
+def render_brief(
+    brief,
+    status,
+    audience,
+    context,
+    numbers,
+):
     render_status(status)
-    st.markdown(f"### {brief.get('headline', 'Stakeholder conclusion')}")
-    st.write(brief.get("summary", ""))
 
-    findings = brief.get("findings", [])[:4]
+    headline = brief.get("headline", "Stakeholder conclusion")
+    st.markdown(f"### {headline}")
+
+    summary = brief.get("summary", "")
+    if summary:
+        st.write(summary)
+
+    st.markdown("### Key findings")
+
+    findings = brief.get("findings", [])
+    findings = findings[:4]
+
     if findings:
         cols = st.columns(len(findings))
+
         for col, item in zip(cols, findings):
             with col:
-                st.markdown(f'<div class="finding-number">{html.escape(str(item.get("number","")))}</div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="finding-label">{html.escape(str(item.get("label","")))}</div>', unsafe_allow_html=True)
-                st.caption(item.get("detail", ""))
+                number = str(item.get("number", ""))
+                label = str(item.get("label", ""))
+                detail = str(item.get("detail", ""))
 
-    st.markdown("**Risks**")
-    for risk in brief.get("risks", []):
-        st.markdown(f"- {risk}")
+                st.markdown(
+                    f"""
+                    <div class="brief-card">
+                        <div class="finding-number">
+                            {html.escape(number)}
+                        </div>
+                        <div class="finding-label">
+                            {html.escape(label)}
+                        </div>
+                        <div class="muted">
+                            {html.escape(detail)}
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
-    st.markdown("**Prioritised actions**")
-    for action in sorted(brief.get("actions", []), key=lambda x: x.get("priority", 99)):
-        st.markdown(f"**{action.get('priority','')}. {action.get('action','')}**")
-        st.markdown(f"- Reason: {action.get('reason','')}")
-        st.markdown(f"- Expected impact: {action.get('expected_impact','')}")
+    st.markdown("### Risks")
 
-    st.caption(f"**Caveat:** {brief.get('caveat', '')}")
+    risks = brief.get("risks", [])
 
-    markdown = brief_to_markdown(brief, status, audience, context)
-    st.download_button(
-        "⬇️ Download brief (.md)",
-        data=markdown,
-        file_name=f"{context.lower().replace(' ', '_')}_brief.md",
-        mime="text/markdown",
-        key=f"download_{context}",
+    if risks:
+        for risk in risks[:2]:
+            st.markdown(f"- {risk}")
+    else:
+        st.caption(
+            "No material risks were identified from the supplied metrics."
+        )
+
+    st.markdown("### Prioritised actions")
+
+    actions = sorted(
+        brief.get("actions", [])[:3],
+        key=lambda x: x.get("priority", 99),
     )
-    with st.expander("Numbers the AI was given"):
+
+    for action in actions:
+        priority = action.get("priority", "")
+        action_text = action.get("action", "")
+        reason = action.get("reason", "")
+        impact = action.get("expected_impact", "")
+
+        st.markdown(f"**{priority}. {action_text}**")
+        st.markdown(f"- **Reason:** {reason}")
+        st.markdown(f"- **Expected impact:** {impact}")
+
+    caveat = brief.get(
+        "caveat",
+        (
+            "These figures describe the selected data and filters "
+            "and do not establish causation."
+        ),
+    )
+
+    st.caption(f"**How to read the numbers:** {caveat}")
+
+    markdown = brief_to_markdown(
+        brief=brief,
+        status=status,
+        audience=audience,
+        context=context,
+    )
+
+    safe_filename = (
+        context.lower()
+        .replace(" ", "_")
+        .replace("&", "and")
+        .replace("/", "_")
+    )
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.download_button(
+            "⬇️ Download Markdown",
+            data=markdown,
+            file_name=f"{safe_filename}_brief.md",
+            mime="text/markdown",
+            width="stretch",
+            key=f"download_md_{safe_filename}",
+        )
+
+    with col2:
+        st.download_button(
+            "⬇️ Download Text",
+            data=markdown,
+            file_name=f"{safe_filename}_brief.txt",
+            mime="text/plain",
+            width="stretch",
+            key=f"download_txt_{safe_filename}",
+        )
+
+    with st.expander("🔍 Numbers the AI was given"):
         st.json(numbers)
-    st.markdown("**Copy as text**")
-    st.code(markdown, language="markdown")
+
+    with st.expander("📋 Copy as text"):
+        st.text_area(
+            "Stakeholder brief",
+            value=markdown,
+            height=420,
+            label_visibility="collapsed",
+        )
 
 
 def generate_brief_button(context, numbers, status=None):
     audience = st.session_state.brief_audience
+
     if status is None:
         status = status_from_metrics(numbers)
-    if st.button("Generate brief", type="primary", key=f"brief_{context}"):
-        with st.spinner("Generating stakeholder brief from the computed numbers..."):
+
+    button_key = (
+        "brief_"
+        + context.lower()
+        .replace(" ", "_")
+        .replace("&", "and")
+        .replace("/", "_")
+        .replace("—", "_")
+        .replace("–", "_")
+    )
+
+    if st.button(
+        "Generate brief",
+        type="primary",
+        width="stretch",
+        key=button_key,
+    ):
+        with st.spinner("Generating stakeholder brief..."):
             try:
-                brief = generate_stakeholder_brief(numbers, context, audience)
-                st.session_state[f"brief_result_{context}"] = (brief, status, audience, numbers)
+                # Keep the payload small and JSON serializable.
+                safe_numbers = json.loads(
+                    json.dumps(numbers, default=str)
+                )
+
+                brief = generate_stakeholder_brief(
+                    numbers=safe_numbers,
+                    context=context,
+                    audience=audience,
+                )
+
+                st.session_state[f"brief_result_{context}"] = {
+                    "brief": brief,
+                    "status": status,
+                    "audience": audience,
+                    "numbers": safe_numbers,
+                }
+
+                st.session_state[f"brief_error_{context}"] = None
+
             except Exception as e:
-                st.error(f"Could not generate the brief: {e}")
+                st.session_state[f"brief_error_{context}"] = str(e)
+
+    error = st.session_state.get(f"brief_error_{context}")
+
+    if error:
+        st.error("Could not generate the brief.")
+        with st.expander("Technical details"):
+            st.code(error)
+
     stored = st.session_state.get(f"brief_result_{context}")
-    if stored:
-        brief, stored_status, stored_audience, stored_numbers = stored
-        st.markdown("---")
-        st.subheader("Stakeholder brief")
-        render_brief(brief, stored_status, stored_audience, context, stored_numbers)
+
+    if not stored:
+        return
+
+    brief = stored["brief"]
+    stored_status = stored["status"]
+    stored_audience = stored["audience"]
+    stored_numbers = stored["numbers"]
+
+    st.markdown("---")
+    st.subheader("Stakeholder brief")
+
+    render_brief(
+        brief,
+        stored_status,
+        stored_audience,
+        context,
+        stored_numbers,
+    )
 
 
 def csv_download(df, label, filename, key):
@@ -372,13 +535,30 @@ elif page == "👥 Customer Intelligence (RFM)":
 
         csv_download(seg, "Download segment table", "rfm_segments.csv", "csv_rfm")
 
-        top_share = seg[seg["rfm_segment"].isin(["Champions", "Loyal Customers"])]["revenue_share_pct"].sum()
         numbers = {
             "customers_analyzed": int(len(rfm)),
-            "segment_customer_counts": {str(k): int(v) for k, v in rfm["rfm_segment"].value_counts().items()},
-            "segment_revenue": {str(r["rfm_segment"]): round(float(r["total_revenue"]), 2) for _, r in seg.iterrows()},
-            "segment_revenue_share_pct": {str(r["rfm_segment"]): round(float(r["revenue_share_pct"]), 2) for _, r in seg.iterrows()},
-            "champions_plus_loyal_revenue_share_pct": round(float(top_share), 2),
+            "segment_customer_counts": {
+                str(k): int(v)
+                for k, v in rfm["rfm_segment"].value_counts().to_dict().items()
+            },
+            "segment_revenue": {
+                str(r["rfm_segment"]): round(float(r["total_revenue"]), 2)
+                for _, r in seg.iterrows()
+            },
+            "segment_revenue_share_pct": {
+                str(r["rfm_segment"]): round(float(r["revenue_share_pct"]), 2)
+                for _, r in seg.iterrows()
+            },
+            "top_segment_by_revenue": (
+                str(seg.iloc[0]["rfm_segment"])
+                if not seg.empty
+                else None
+            ),
+            "top_segment_revenue_share_pct": (
+                round(float(seg.iloc[0]["revenue_share_pct"]), 2)
+                if not seg.empty
+                else None
+            ),
         }
         generate_brief_button("RFM Customer Segmentation", numbers)
     except Exception as e:
@@ -432,11 +612,30 @@ elif page == "📦 Product & Category":
         total_revenue = prod["revenue"].sum()
         top5 = prod.head(5)
         numbers = {
-            "categories_in_table": int(len(prod)),
-            "top_category": str(prod.iloc[0]["category"]),
-            "top_category_revenue": round(float(prod.iloc[0]["revenue"]), 2),
-            "top_5_revenue_share_of_loaded_table_pct": round(float(top5["revenue"].sum() / total_revenue * 100), 2) if total_revenue else 0,
-            "top_5_average_rating": round(float(top5["avg_rating"].mean()), 3),
+            "categories_loaded": int(len(prod)),
+            "top_category": (
+                str(prod.iloc[0]["category"])
+                if not prod.empty
+                else None
+            ),
+            "top_category_revenue": (
+                round(float(prod.iloc[0]["revenue"]), 2)
+                if not prod.empty
+                else None
+            ),
+            "top_5_revenue_share_of_loaded_categories_pct": (
+                round(
+                    float(top5["revenue"].sum() / total_revenue * 100),
+                    2,
+                )
+                if total_revenue
+                else 0
+            ),
+            "top_5_average_rating": (
+                round(float(top5["avg_rating"].mean()), 2)
+                if not top5.empty
+                else None
+            ),
         }
         generate_brief_button("Product & Category Performance", numbers)
     except Exception as e:
@@ -465,13 +664,28 @@ elif page == "🏪 Seller Performance":
 
         numbers = {
             "sellers_loaded": int(len(sellers)),
-            "review_threshold_on_time_pct": ON_TIME_TARGET,
-            "review_threshold_rating": GOOD_RATING,
-            "sellers_flagged": int(sellers["needs_review"].sum()),
-            "flagged_seller_revenue": round(float(review["revenue"].sum()), 2),
-            "top_seller_revenue": round(float(sellers.iloc[0]["revenue"]), 2),
-            "top_seller_on_time_pct": round(float(sellers.iloc[0]["on_time_pct"]), 2),
-            "top_seller_rating": round(float(sellers.iloc[0]["avg_rating"]), 2),
+            "on_time_target_pct": float(ON_TIME_TARGET),
+            "good_rating_target": float(GOOD_RATING),
+            "sellers_flagged_for_review": int(sellers["needs_review"].sum()),
+            "flagged_seller_revenue": round(
+                float(review["revenue"].sum()),
+                2,
+            ),
+            "top_seller_revenue": (
+                round(float(sellers.iloc[0]["revenue"]), 2)
+                if not sellers.empty
+                else None
+            ),
+            "top_seller_on_time_pct": (
+                round(float(sellers.iloc[0]["on_time_pct"]), 2)
+                if not sellers.empty
+                else None
+            ),
+            "top_seller_rating": (
+                round(float(sellers.iloc[0]["avg_rating"]), 2)
+                if not sellers.empty
+                else None
+            ),
         }
         generate_brief_button("Seller Performance", numbers)
     except Exception as e:
