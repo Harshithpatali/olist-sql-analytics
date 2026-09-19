@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Best currently available Groq model for high-quality explanations (Sep 2026)
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL = "openai/gpt-oss-20b"
 
 def get_groq_client():
     api_key = os.getenv("GROQ_API_KEY")
